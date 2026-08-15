@@ -139,6 +139,16 @@ body.DarkMode {
   font-size: 0.9em;
   margin-left: 0.5em;
 }
+#input-stt-ptt {
+  display: none;
+  width: 14em;
+  margin-left: 0.5em;
+  font-size: 0.95em;
+  cursor: pointer;
+}
+#input-stt-ptt:focus {
+  outline: 2px solid #C66;
+}
 #audio-unavailable {
   display: none;
 }
@@ -417,6 +427,7 @@ down a gully.
 <select disabled id="sel-stt-ptt" name="stt-ptt">
 <option>&nbsp;--&nbsp;</option>
 </select>
+<input id="input-stt-ptt" type="text" readonly placeholder="Click here, then press a key">
 </div>
 <div>
 <input type="checkbox" id="check-stt-autosubmit">

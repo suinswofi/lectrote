@@ -562,7 +562,13 @@ function stop_listening(discard)
 
     var rate = mic_ctx.sampleRate;
     if (samples < audioconfig.ptt_min_seconds * rate) {
-        show_transient('Too short — hold the key while you speak', 2000, null);
+        /* (A quick tap of a bare-modifier talk key is probably just a
+           shortcut; don't nag about it.) */
+        var spec = ptt_spec();
+        if (!(spec && spec.modifier))
+            show_transient('Too short — hold the key while you speak', 2000, null);
+        else
+            update_bar();
         return;
     }
 
@@ -711,19 +717,32 @@ function inject_input(text)
 }
 
 /* The push-to-talk key: window-level, capture phase, so GlkOte never
-   sees it. */
+   sees it. The key spec comes from audioconfig (or the custom pref);
+   see ptt_spec_for_prefs(). */
+function ptt_spec()
+{
+    return audioconfig.ptt_spec_for_prefs(prefs);
+}
+
 function ptt_matches_down(ev)
 {
     if (!prefs || !prefs.stt_enabled)
         return false;
-    var ptt = audioconfig.ptt_key_for_key(prefs.stt_ptt_key);
-    if (!ptt)
+    var spec = ptt_spec();
+    if (!spec || !spec.codes || spec.codes.indexOf(ev.code) < 0)
         return false;
-    if (ev.code != ptt.code)
+    if (spec.modifier) {
+        /* A bare modifier key (hold Ctrl). Its own flag is set on its
+           keydown; ignore the others. */
+        return true;
+    }
+    if ((ev.ctrlKey == true) != (spec.ctrl == true))
         return false;
-    if (ev.ctrlKey != ptt.ctrl || ev.altKey != ptt.alt || ev.shiftKey != ptt.shift)
+    if ((ev.altKey == true) != (spec.alt == true))
         return false;
-    if (ev.metaKey)
+    if ((ev.shiftKey == true) != (spec.shift == true))
+        return false;
+    if ((ev.metaKey == true) != (spec.meta == true))
         return false;
     return true;
 }
@@ -734,24 +753,37 @@ function ptt_matches_up(ev)
 {
     if (!listening || listen_toggle_mode)
         return false;
-    var ptt = audioconfig.ptt_key_for_key(prefs.stt_ptt_key);
-    if (!ptt)
+    var spec = ptt_spec();
+    if (!spec || !spec.codes)
         return false;
-    if (ev.code == ptt.code)
+    if (spec.codes.indexOf(ev.code) >= 0)
         return true;
-    if (ptt.ctrl && ev.key == 'Control')
+    if (spec.modifier)
+        return false;
+    if (spec.ctrl && ev.key == 'Control')
         return true;
-    if (ptt.alt && ev.key == 'Alt')
+    if (spec.alt && ev.key == 'Alt')
         return true;
-    if (ptt.shift && ev.key == 'Shift')
+    if (spec.shift && ev.key == 'Shift')
+        return true;
+    if (spec.meta && ev.key == 'Meta')
         return true;
     return false;
 }
 
 function evhan_keydown(ev)
 {
-    if (!ptt_matches_down(ev))
+    if (!ptt_matches_down(ev)) {
+        /* If the talk key is a bare modifier and another key is pressed
+           while it's held, the player is typing a shortcut (Ctrl+C), not
+           talking. Drop the recording and let the key through. */
+        if (listening && !listen_toggle_mode) {
+            var spec = ptt_spec();
+            if (spec && spec.modifier && !ev.repeat)
+                stop_listening(true);
+        }
         return;
+    }
     ev.preventDefault();
     ev.stopPropagation();
     if (ev.repeat)
@@ -944,7 +976,7 @@ function update_bar(forcestate)
             cls += ' Idle';
             icon = '';
             if (stton) {
-                var ptt = audioconfig.ptt_key_for_key(prefs.stt_ptt_key);
+                var ptt = ptt_spec();
                 text = 'Hold ' + (ptt ? ptt.label : 'the talk key') + ' to speak';
             }
             else {

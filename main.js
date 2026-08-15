@@ -697,7 +697,8 @@ function audio_prefs_for_renderer()
         stt_enabled: (audio_available && prefs.stt_enabled),
         stt_model: prefs.stt_model,
         stt_auto_submit: prefs.stt_auto_submit,
-        stt_ptt_key: prefs.stt_ptt_key
+        stt_ptt_key: prefs.stt_ptt_key,
+        stt_ptt_custom: prefs.stt_ptt_custom
     };
 }
 
@@ -2617,6 +2618,25 @@ electron.ipcMain.on('pref_stt_ptt_key', function(ev, arg) {
     if (!audioconfig.ptt_key_for_key(arg))
         return;
     prefs.stt_ptt_key = arg;
+    note_prefs_dirty();
+    broadcast_audio_prefs();
+});
+
+/* A custom push-to-talk key spec, built by the prefs window from a
+   KeyboardEvent (see audioconfig.ptt_spec_from_event). */
+electron.ipcMain.on('pref_stt_ptt_custom', function(ev, arg) {
+    if (!arg || !Array.isArray(arg.codes) || !arg.codes.length)
+        return;
+    prefs.stt_ptt_custom = {
+        codes: arg.codes.map(String).slice(0, 4),
+        modifier: (arg.modifier == true),
+        ctrl: (arg.ctrl == true),
+        alt: (arg.alt == true),
+        shift: (arg.shift == true),
+        meta: (arg.meta == true),
+        label: String(arg.label || arg.codes[0]).slice(0, 40)
+    };
+    prefs.stt_ptt_key = 'custom';
     note_prefs_dirty();
     broadcast_audio_prefs();
 });

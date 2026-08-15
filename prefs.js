@@ -206,6 +206,28 @@ function setup_audio_prefs(prefs, arg)
     }
     sel.on('change', evhan_stt_ptt);
 
+    /* The custom-key field: click it and press the key (or key combo)
+       you want. */
+    var inpel = $('#input-stt-ptt');
+    inpel.on('keydown', evhan_stt_ptt_capture);
+    inpel.on('focus', function() {
+        inpel.val('');
+        inpel.attr('placeholder', 'Press a key or combination…');
+    });
+    inpel.on('blur', function() {
+        inpel.attr('placeholder', 'Click here, then press a key');
+        if (prefs_ptt_key == 'custom' && !prefs_ptt_custom) {
+            /* Nothing was captured; go back to the key actually in
+               effect. */
+            $('#sel-stt-ptt').val(confirmed_ptt_key);
+            apply_stt_ptt(confirmed_ptt_key, null);
+            return;
+        }
+        apply_stt_ptt(prefs_ptt_key, prefs_ptt_custom);
+    });
+    confirmed_ptt_key = prefs.stt_ptt_key;
+    apply_stt_ptt(prefs.stt_ptt_key, prefs.stt_ptt_custom);
+
     sel = $('#check-stt-autosubmit');
     sel.prop('checked', prefs.stt_auto_submit ? true : false);
     sel.on('change', evhan_stt_autosubmit);
@@ -357,6 +379,30 @@ function apply_zoom_level(val)
     else if (val < 0)
         text = 'Zoom Out ' + (-val);
     el.text(text);
+}
+
+/* Remembered so the custom-key field can be refreshed. */
+var prefs_ptt_key = null;
+var prefs_ptt_custom = null;
+var confirmed_ptt_key = null; /* the key the app says is in effect */
+
+/* Show or hide the custom-key field, and show the current custom key
+   in it. */
+function apply_stt_ptt(key, custom)
+{
+    prefs_ptt_key = key;
+    prefs_ptt_custom = custom;
+    var inpel = $('#input-stt-ptt');
+    if (key == 'custom') {
+        inpel.css('display', 'inline-block');
+        if (custom && custom.label)
+            inpel.val(custom.label);
+        else
+            inpel.val('');
+    }
+    else {
+        inpel.css('display', 'none');
+    }
 }
 
 function apply_tts_speed(val)
@@ -544,7 +590,37 @@ function evhan_stt_model()
 function evhan_stt_ptt()
 {
     var val = $('#sel-stt-ptt').val();
+    if (val == 'custom') {
+        /* Only tell the app once a key has actually been captured;
+           until then the previous key stays in effect. */
+        apply_stt_ptt('custom', prefs_ptt_custom);
+        if (!prefs_ptt_custom)
+            $('#input-stt-ptt').focus();
+        else
+            electron.ipcRenderer.send('pref_stt_ptt_key', val);
+        return;
+    }
+    apply_stt_ptt(val, prefs_ptt_custom);
     electron.ipcRenderer.send('pref_stt_ptt_key', val);
+}
+
+function evhan_stt_ptt_capture(ev)
+{
+    ev.preventDefault();
+    ev.stopPropagation();
+    var orig = ev.originalEvent || ev;
+    if (orig.key == 'Escape' || orig.key == 'Tab') {
+        $('#input-stt-ptt').blur();
+        return;
+    }
+    var spec = audioconfig.ptt_spec_from_event(orig);
+    if (!spec)
+        return;
+    prefs_ptt_custom = spec;
+    prefs_ptt_key = 'custom';
+    $('#input-stt-ptt').val(spec.label);
+    electron.ipcRenderer.send('pref_stt_ptt_custom', spec);
+    $('#input-stt-ptt').blur();
 }
 
 function evhan_stt_autosubmit()
@@ -579,6 +655,8 @@ electron.ipcRenderer.on('set-audio-prefs', function(ev, arg) {
     $('#check-stt').prop('checked', arg.stt_enabled ? true : false);
     $('#sel-stt-model').val(arg.stt_model);
     $('#sel-stt-ptt').val(arg.stt_ptt_key);
+    confirmed_ptt_key = arg.stt_ptt_key;
+    apply_stt_ptt(arg.stt_ptt_key, arg.stt_ptt_custom);
     $('#check-stt-autosubmit').prop('checked', arg.stt_auto_submit ? true : false);
     apply_audio_status(last_audio_status);
 });

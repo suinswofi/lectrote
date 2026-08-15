@@ -65,15 +65,79 @@ const stt_models = [
 
 const stt_sample_rate = 16000;
 
-/* Push-to-talk keys. The renderer matches these against KeyboardEvent
-   code and modifier flags. */
+/* Push-to-talk keys. Each is a "key spec": the renderer matches it
+   against KeyboardEvent.code (any of the codes) and the modifier flags.
+   A spec with modifier:true is a bare modifier key (hold Ctrl by
+   itself), for which the flags are not checked. The 'custom' entry
+   means "use the spec stored in the stt_ptt_custom pref", which the
+   prefs window builds with ptt_spec_from_event(). */
 const ptt_keys = [
-    { key:'ctrl-space',       label:'Ctrl+Space',        code:'Space', ctrl:true,  shift:false, alt:false },
-    { key:'ctrl-shift-space', label:'Ctrl+Shift+Space',  code:'Space', ctrl:true,  shift:true,  alt:false },
-    { key:'alt-space',        label:'Alt+Space',         code:'Space', ctrl:false, shift:false, alt:true },
-    { key:'f8',               label:'F8',                code:'F8',    ctrl:false, shift:false, alt:false },
-    { key:'f9',               label:'F9',                code:'F9',    ctrl:false, shift:false, alt:false }
+    { key:'ctrl-space',       label:'Ctrl+Space',        codes:['Space'], ctrl:true,  shift:false, alt:false },
+    { key:'ctrl-shift-space', label:'Ctrl+Shift+Space',  codes:['Space'], ctrl:true,  shift:true,  alt:false },
+    { key:'alt-space',        label:'Alt+Space',         codes:['Space'], ctrl:false, shift:false, alt:true },
+    { key:'ctrl',             label:'Ctrl (either side)', codes:['ControlLeft', 'ControlRight'], modifier:true },
+    { key:'ctrl-right',       label:'Right Ctrl',        codes:['ControlRight'], modifier:true },
+    { key:'alt',              label:'Alt (either side)',  codes:['AltLeft', 'AltRight'], modifier:true },
+    { key:'alt-right',        label:'Right Alt',         codes:['AltRight'], modifier:true },
+    { key:'f8',               label:'F8',                codes:['F8'],    ctrl:false, shift:false, alt:false },
+    { key:'f9',               label:'F9',                codes:['F9'],    ctrl:false, shift:false, alt:false },
+    { key:'custom',           label:'Custom…',       custom:true }
 ];
+
+/* Build a key spec from a KeyboardEvent (in the prefs window, when the
+   user picks a custom key). Returns null if the event isn't usable. */
+function ptt_spec_from_event(ev)
+{
+    if (!ev || !ev.code)
+        return null;
+    var modnames = { 'Control':'Ctrl', 'Alt':'Alt', 'Shift':'Shift', 'Meta':'Meta' };
+    if (modnames[ev.key]) {
+        var side = '';
+        if (ev.code.endsWith('Left'))
+            side = 'Left ';
+        else if (ev.code.endsWith('Right'))
+            side = 'Right ';
+        return { codes:[ev.code], modifier:true, label:side + modnames[ev.key] };
+    }
+    if (ev.key == 'Escape' || ev.key == 'Tab' || ev.key == 'Enter')
+        return null;
+    var name = ev.code;
+    if (name.startsWith('Key'))
+        name = name.slice(3);
+    else if (name.startsWith('Digit'))
+        name = name.slice(5);
+    else if (name.startsWith('Numpad'))
+        name = 'Numpad ' + name.slice(6);
+    else if (name.startsWith('Arrow'))
+        name = name.slice(5) + ' arrow';
+    var label = '';
+    if (ev.ctrlKey)
+        label += 'Ctrl+';
+    if (ev.altKey)
+        label += 'Alt+';
+    if (ev.shiftKey)
+        label += 'Shift+';
+    if (ev.metaKey)
+        label += 'Meta+';
+    label += name;
+    return { codes:[ev.code], ctrl:ev.ctrlKey, alt:ev.altKey, shift:ev.shiftKey, meta:ev.metaKey, label:label };
+}
+
+/* Given the prefs (stt_ptt_key, stt_ptt_custom), return the key spec
+   to use, falling back to the default. */
+function ptt_spec_for_prefs(prefs)
+{
+    var key = prefs ? prefs.stt_ptt_key : null;
+    if (key == 'custom') {
+        var spec = prefs.stt_ptt_custom;
+        if (spec && spec.codes && spec.codes.length)
+            return spec;
+    }
+    var val = ptt_key_for_key(key);
+    if (!val || val.custom)
+        val = ptt_key_for_key(pref_defaults.stt_ptt_key);
+    return val;
+}
 
 /* Longest utterance we will record before cutting off, in seconds. */
 const ptt_max_seconds = 30;
@@ -94,7 +158,8 @@ const pref_defaults = {
     stt_enabled: false,
     stt_model: 'whisper-small.en',
     stt_auto_submit: true,
-    stt_ptt_key: 'ctrl-space'
+    stt_ptt_key: 'ctrl-space',
+    stt_ptt_custom: null   /* a key spec, when stt_ptt_key is 'custom' */
 };
 
 function stt_model_for_key(key)
@@ -129,3 +194,5 @@ exports.speech_max_chars = speech_max_chars;
 exports.pref_defaults = pref_defaults;
 exports.stt_model_for_key = stt_model_for_key;
 exports.ptt_key_for_key = ptt_key_for_key;
+exports.ptt_spec_from_event = ptt_spec_from_event;
+exports.ptt_spec_for_prefs = ptt_spec_for_prefs;
