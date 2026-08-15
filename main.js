@@ -6,6 +6,7 @@ const path_mod = require('path');
 
 const formats = require('./formats.js');
 const traread = require('./traread.js');
+const audioconfig = require('./audioconfig.js');
 
 var package_json = {}; /* parsed form of our package.json file */
 var main_extension = {}; /* extra code for bound games */
@@ -37,9 +38,26 @@ var prefs = {
     glulx_terp: 'quixe'   // engine.id from formats.js
     // could also have zcode_terp, hugo_terp, ink-json_terp here. (I know, ink-json_terp is ugly, I should rename that.)
 };
+/* The speech (TTS/STT) preferences: tts_enabled, tts_voice, stt_enabled,
+   etc. See audioconfig.js. */
+for (var key in audioconfig.pref_defaults) {
+    prefs[key] = audioconfig.pref_defaults[key];
+}
 var prefspath = path_mod.join(app.getPath('userData'), 'lectrote-prefs.json');
 var prefstimer = null;
 var prefswriting = false;
+
+/* Speech feature state. The audio engine is a utility process (see
+   audioengine.js) which owns the speech models. There is at most one,
+   shared by all game windows. */
+var audio_available = false; /* true if the speech modules are installed for this platform */
+var audioengine = null; /* the engine process, if running */
+var audioengine_ready = false; /* it has booted and accepted our init message */
+var audio_idletimer = null; /* timer to shut down an unused engine */
+var audio_status = {
+    tts: { status:'unloaded', model:null, pct:null, error:null },
+    stt: { status:'unloaded', model:null, pct:null, error:null }
+};
 
 var app_ready = false; /* true once the ready event occurs */
 var app_quitting = false; /* true once the will-quit event occurs */
@@ -459,6 +477,321 @@ function invoke_app_hook(win, func, arg)
     win.webContents.send(func, arg);
 }
 
+/* --- Speech (TTS/STT) support --- */
+
+/* Decide whether the speech features can work at all: the modules must
+   be installed (they're omitted from some packaged builds) and the ONNX
+   runtime must have a binary for this platform.
+*/
+function check_audio_available()
+{
+    if (package_json.lectroteAudioFeatures === false)
+        return false;
+    try {
+        require.resolve('kokoro-js');
+        require.resolve('@huggingface/transformers');
+    }
+    catch (ex) {
+        return false;
+    }
+    var bindir = path_mod.join(__dirname, 'node_modules', 'onnxruntime-node', 'bin', 'napi-v3', process.platform, process.arch);
+    return fs.existsSync(bindir);
+}
+
+/* Where downloaded speech models live. */
+function audio_model_dir()
+{
+    return path_mod.join(app.getPath('userData'), 'models');
+}
+
+/* Start the audio engine process, if it isn't running.
+*/
+function ensure_audio_engine()
+{
+    if (audioengine || !audio_available)
+        return;
+
+    var enginepath = path_mod.join(__dirname, 'audioengine.js');
+    var child = electron.utilityProcess.fork(enginepath, [], {
+        serviceName: 'Lectrote Audio Engine',
+        stdio: 'inherit'
+    });
+    audioengine = child;
+    audioengine_ready = false;
+
+    child.on('message', function(msg) {
+        if (audioengine !== child)
+            return;
+        handle_audio_engine_message(msg);
+    });
+    child.on('exit', function(code) {
+        if (audioengine !== child)
+            return;
+        audioengine = null;
+        audioengine_ready = false;
+        for (var key of ['tts', 'stt']) {
+            audio_status[key] = { status:'unloaded', model:null, pct:null, error:null };
+        }
+        broadcast_audio_status();
+    });
+}
+
+/* Shut down the audio engine (politely, then forcibly).
+*/
+function stop_audio_engine()
+{
+    if (audio_idletimer) {
+        clearTimeout(audio_idletimer);
+        audio_idletimer = null;
+    }
+    var child = audioengine;
+    if (!child)
+        return;
+    audioengine = null;
+    audioengine_ready = false;
+    try {
+        child.postMessage({ type:'shutdown' });
+    }
+    catch (ex) {}
+    setTimeout(function() {
+        try {
+            child.kill();
+        }
+        catch (ex) {}
+    }, 2000);
+    for (var key of ['tts', 'stt']) {
+        audio_status[key] = { status:'unloaded', model:null, pct:null, error:null };
+    }
+    broadcast_audio_status();
+}
+
+/* Make the engine's loaded models match the preferences. Called whenever
+   a speech pref changes and when the engine boots. If neither feature
+   is on, the engine is shut down after a while to free memory.
+*/
+function sync_audio_engine_loads()
+{
+    if (!audio_available)
+        return;
+
+    if (!prefs.tts_enabled && !prefs.stt_enabled) {
+        if (audioengine && !audio_idletimer) {
+            audio_idletimer = setTimeout(function() {
+                audio_idletimer = null;
+                if (!prefs.tts_enabled && !prefs.stt_enabled)
+                    stop_audio_engine();
+            }, 30000);
+        }
+        if (audioengine && audioengine_ready) {
+            audioengine.postMessage({ type:'tts_unload' });
+            audioengine.postMessage({ type:'stt_unload' });
+        }
+        return;
+    }
+
+    if (audio_idletimer) {
+        clearTimeout(audio_idletimer);
+        audio_idletimer = null;
+    }
+
+    ensure_audio_engine();
+    if (!audioengine || !audioengine_ready)
+        return; /* we'll be called again when it's ready */
+
+    if (prefs.tts_enabled) {
+        audioengine.postMessage({ type:'tts_load', model:audioconfig.tts_model.id, dtype:audioconfig.tts_model.dtype });
+    }
+    else {
+        audioengine.postMessage({ type:'tts_unload' });
+    }
+
+    if (prefs.stt_enabled) {
+        var model = audioconfig.stt_model_for_key(prefs.stt_model);
+        if (!model)
+            model = audioconfig.stt_model_for_key(audioconfig.pref_defaults.stt_model);
+        audioengine.postMessage({ type:'stt_load', model:model.id, dtype:model.dtype });
+    }
+    else {
+        audioengine.postMessage({ type:'stt_unload' });
+    }
+}
+
+function handle_audio_engine_message(msg)
+{
+    if (!msg || !msg.type)
+        return;
+    var game;
+
+    switch (msg.type) {
+
+    case 'ready':
+        audioengine_ready = true;
+        audioengine.postMessage({ type:'init', modeldir:audio_model_dir() });
+        sync_audio_engine_loads();
+        break;
+
+    case 'status':
+        var state = audio_status[msg.engine];
+        if (state) {
+            state.status = msg.status;
+            state.model = msg.model;
+            state.error = msg.error;
+            if (msg.status != 'downloading')
+                state.pct = null;
+            broadcast_audio_status();
+        }
+        break;
+
+    case 'progress':
+        var state = audio_status[msg.engine];
+        if (state) {
+            state.pct = msg.pct;
+            broadcast_audio_status();
+        }
+        break;
+
+    case 'tts_audio':
+        game = gamewins[msg.winid];
+        if (game && game.win) {
+            invoke_app_hook(game.win, 'speech_audio', { jobid:msg.jobid, seq:msg.seq, text:msg.text, audio:msg.audio, sample_rate:msg.sample_rate });
+        }
+        break;
+
+    case 'tts_done':
+        game = gamewins[msg.winid];
+        if (game && game.win) {
+            invoke_app_hook(game.win, 'speech_done', { jobid:msg.jobid, cancelled:msg.cancelled });
+        }
+        break;
+
+    case 'stt_result':
+        game = gamewins[msg.winid];
+        if (game && game.win) {
+            invoke_app_hook(game.win, 'speech_result', { reqid:msg.reqid, text:msg.text, ms:msg.ms });
+        }
+        break;
+
+    case 'stt_error':
+        game = gamewins[msg.winid];
+        if (game && game.win) {
+            invoke_app_hook(game.win, 'speech_stt_error', { reqid:msg.reqid, error:msg.error });
+        }
+        break;
+
+    case 'log':
+        console.log('audioengine:', msg.msg);
+        break;
+    }
+}
+
+/* The subset of prefs that the game windows need for speech. */
+function audio_prefs_for_renderer()
+{
+    return {
+        audio_available: audio_available,
+        tts_enabled: (audio_available && prefs.tts_enabled),
+        tts_voice: prefs.tts_voice,
+        tts_speed: prefs.tts_speed,
+        tts_speak_input: prefs.tts_speak_input,
+        tts_fallback_os: prefs.tts_fallback_os,
+        stt_enabled: (audio_available && prefs.stt_enabled),
+        stt_model: prefs.stt_model,
+        stt_auto_submit: prefs.stt_auto_submit,
+        stt_ptt_key: prefs.stt_ptt_key
+    };
+}
+
+/* Send the speech prefs to every game window (and the prefs window, so
+   its controls stay in sync with menu toggles), and fix up the menu
+   checkmarks.
+*/
+function broadcast_audio_prefs()
+{
+    var obj = audio_prefs_for_renderer();
+    for (var id in gamewins) {
+        var game = gamewins[id];
+        if (game.win && !game.win.isDestroyed())
+            invoke_app_hook(game.win, 'set_audio_prefs', obj);
+    }
+    if (prefswin && !prefswin.isDestroyed())
+        prefswin.webContents.send('set-audio-prefs', obj);
+    refresh_audio_menu_items();
+}
+
+function broadcast_audio_status()
+{
+    for (var id in gamewins) {
+        var game = gamewins[id];
+        if (game.win && !game.win.isDestroyed())
+            invoke_app_hook(game.win, 'set_audio_status', audio_status);
+    }
+    if (prefswin && !prefswin.isDestroyed())
+        prefswin.webContents.send('audio-status', audio_status);
+}
+
+/* Update the checkmarks on the speech menu items (in every menu, since
+   Win/Linux have one per window).
+*/
+function refresh_audio_menu_items()
+{
+    var menus = [];
+    if (process.platform == 'darwin') {
+        menus.push(electron.Menu.getApplicationMenu());
+    }
+    else {
+        for (var id in winmenus)
+            menus.push(winmenus[id]);
+    }
+    for (var menu of menus) {
+        if (!menu)
+            continue;
+        var item = menu.getMenuItemById('tts_enabled');
+        if (item)
+            item.checked = prefs.tts_enabled;
+        var item = menu.getMenuItemById('stt_enabled');
+        if (item)
+            item.checked = prefs.stt_enabled;
+    }
+}
+
+/* Turn speech output on or off. This is the single code path for the
+   prefs checkbox and the menu item.
+*/
+function set_tts_enabled(val)
+{
+    val = (val == true);
+    if (!audio_available)
+        val = false;
+    if (prefs.tts_enabled != val) {
+        prefs.tts_enabled = val;
+        note_prefs_dirty();
+    }
+    if (!val && audioengine && audioengine_ready) {
+        audioengine.postMessage({ type:'tts_stop', winid:null });
+    }
+    sync_audio_engine_loads();
+    broadcast_audio_prefs();
+}
+
+/* Turn speech input on or off. On Mac, this is where we ask for
+   microphone permission.
+*/
+function set_stt_enabled(val)
+{
+    val = (val == true);
+    if (!audio_available)
+        val = false;
+    if (prefs.stt_enabled != val) {
+        prefs.stt_enabled = val;
+        note_prefs_dirty();
+    }
+    if (val && process.platform == 'darwin' && electron.systemPreferences.askForMediaAccess) {
+        electron.systemPreferences.askForMediaAccess('microphone').catch(function(ex) {});
+    }
+    sync_audio_engine_loads();
+    broadcast_audio_prefs();
+}
+
 /* Given a pathname, figure out what kind of game it is. This relies on
    the format list in formats.js. It returns a format object from that
    file.
@@ -720,6 +1053,9 @@ function launch_game(path)
     /* Game window callbacks */
 
     win.on('closed', function() {
+        if (audioengine && audioengine_ready) {
+            audioengine.postMessage({ type:'tts_stop', winid:game.id });
+        }
         delete gamewins[game.id];
         delete winmenus[game.id];
         game.win = null;
@@ -763,6 +1099,12 @@ function launch_game(path)
             funcs.push({ key: 'set_disable_autosave', arg: true });
         }
         funcs.push({
+            key: 'set_audio_prefs',
+            arg: audio_prefs_for_renderer() });
+        funcs.push({
+            key: 'set_audio_status',
+            arg: audio_status });
+        funcs.push({
             key: 'load_named_game',
             arg: {
                 path: game.path, format: kind.id, engine: game.engineid,
@@ -770,6 +1112,14 @@ function launch_game(path)
             } });
 
         invoke_app_hook(win, 'sequence', funcs);
+    });
+
+    win.webContents.on('did-start-loading', function() {
+        /* The page is loading (or reloading, for a game reset). Any
+           speech in progress for it is stale. */
+        if (audioengine && audioengine_ready && win) {
+            audioengine.postMessage({ type:'tts_stop', winid:win.id });
+        }
     });
 
     win.webContents.on('found-in-page', function(ev, res) {
@@ -1078,7 +1428,7 @@ function open_prefs_window()
 
     prefswin.webContents.on('dom-ready', function() {
             prefswin.webContents.send('set-darklight-mode', electron.nativeTheme.shouldUseDarkColors);
-            prefswin.webContents.send('current-prefs', { prefs:prefs, isbound:isbound });
+            prefswin.webContents.send('current-prefs', { prefs:prefs, isbound:isbound, audioavailable:audio_available, audiostatus:audio_status, modeldir:audio_model_dir() });
         });
 
     prefswin.loadURL('file://' + __dirname + '/prefs.html');
@@ -1372,6 +1722,24 @@ function window_focus_update(win, arg)
             item.enabled = istrashow;
             if (istrashow) {
                 item.checked = (arg && arg.type == 'trashow' && arg.timestamps);
+            }
+        }
+
+        var item = menu.getMenuItemById('tts_enabled');
+        if (item) {
+            item.visible = audio_available;
+            item.checked = prefs.tts_enabled;
+        }
+        var item = menu.getMenuItemById('stt_enabled');
+        if (item) {
+            item.visible = audio_available;
+            item.checked = prefs.stt_enabled;
+        }
+        for (var key of ['tts_stop', 'tts_repeat', 'stt_listen_toggle', 'audio_separator']) {
+            var item = menu.getMenuItemById(key);
+            if (item) {
+                item.visible = audio_available;
+                item.enabled = (isgame && audio_available);
             }
         }
     }
@@ -1740,6 +2108,70 @@ function construct_menu_template(wintype)
                     prefswin.webContents.send('set-zoom-level', prefs.gamewin_zoomlevel);
             }
         },
+        { type: 'separator', id: 'audio_separator', visible: audio_available },
+        {
+            label: 'Speak Story Text',
+            id: 'tts_enabled',
+            type: 'checkbox',
+            accelerator: 'CmdOrCtrl+Shift+V',
+            visible: audio_available,
+            checked: prefs.tts_enabled,
+            click: function(item, win) {
+                set_tts_enabled(item.checked);
+            }
+        },
+        {
+            label: 'Stop Speaking',
+            id: 'tts_stop',
+            accelerator: 'CmdOrCtrl+.',
+            visible: audio_available,
+            enabled: false,
+            click: function(item, win) {
+                var game = game_for_window(win);
+                if (!game)
+                    return;
+                if (audioengine && audioengine_ready)
+                    audioengine.postMessage({ type:'tts_stop', winid:game.id });
+                invoke_app_hook(game.win, 'speech_stop_playback', null);
+            }
+        },
+        {
+            label: 'Repeat Last Turn',
+            id: 'tts_repeat',
+            accelerator: 'CmdOrCtrl+Shift+R',
+            visible: audio_available,
+            enabled: false,
+            click: function(item, win) {
+                var game = game_for_window(win);
+                if (!game)
+                    return;
+                invoke_app_hook(game.win, 'speech_repeat', null);
+            }
+        },
+        {
+            label: 'Voice Input (Push to Talk)',
+            id: 'stt_enabled',
+            type: 'checkbox',
+            accelerator: 'CmdOrCtrl+Shift+M',
+            visible: audio_available,
+            checked: prefs.stt_enabled,
+            click: function(item, win) {
+                set_stt_enabled(item.checked);
+            }
+        },
+        {
+            label: 'Listen (Toggle)',
+            id: 'stt_listen_toggle',
+            accelerator: 'CmdOrCtrl+Shift+L',
+            visible: audio_available,
+            enabled: false,
+            click: function(item, win) {
+                var game = game_for_window(win);
+                if (!game)
+                    return;
+                invoke_app_hook(game.win, 'speech_listen_toggle', null);
+            }
+        },
         {
             label: 'Show Transcript Timestamps',
             id: 'show_transcript_timestamps',
@@ -1987,6 +2419,7 @@ app.on('before-quit', function() {
 app.on('will-quit', function() {
     check_autodelete_transcripts();
     write_prefs_now();
+    stop_audio_engine();
 });
 
 electron.nativeTheme.on('updated', function() {
@@ -2128,6 +2561,129 @@ electron.ipcMain.on('pref_traretain_daycount', function(ev, arg) {
     note_prefs_dirty();
 });
 
+/* Speech prefs (from the prefs window). */
+
+electron.ipcMain.on('pref_tts_enabled', function(ev, arg) {
+    set_tts_enabled(arg);
+});
+
+electron.ipcMain.on('pref_tts_voice', function(ev, arg) {
+    prefs.tts_voice = arg;
+    note_prefs_dirty();
+    broadcast_audio_prefs();
+});
+
+electron.ipcMain.on('pref_tts_speed', function(ev, arg) {
+    var val = Number(arg);
+    if (isNaN(val))
+        return;
+    prefs.tts_speed = Math.min(audioconfig.tts_speed_max, Math.max(audioconfig.tts_speed_min, val));
+    note_prefs_dirty();
+    broadcast_audio_prefs();
+});
+
+electron.ipcMain.on('pref_tts_speak_input', function(ev, arg) {
+    prefs.tts_speak_input = (arg == true);
+    note_prefs_dirty();
+    broadcast_audio_prefs();
+});
+
+electron.ipcMain.on('pref_tts_fallback_os', function(ev, arg) {
+    prefs.tts_fallback_os = (arg == true);
+    note_prefs_dirty();
+    broadcast_audio_prefs();
+});
+
+electron.ipcMain.on('pref_stt_enabled', function(ev, arg) {
+    set_stt_enabled(arg);
+});
+
+electron.ipcMain.on('pref_stt_model', function(ev, arg) {
+    if (!audioconfig.stt_model_for_key(arg))
+        return;
+    prefs.stt_model = arg;
+    note_prefs_dirty();
+    sync_audio_engine_loads();
+    broadcast_audio_prefs();
+});
+
+electron.ipcMain.on('pref_stt_auto_submit', function(ev, arg) {
+    prefs.stt_auto_submit = (arg == true);
+    note_prefs_dirty();
+    broadcast_audio_prefs();
+});
+
+electron.ipcMain.on('pref_stt_ptt_key', function(ev, arg) {
+    if (!audioconfig.ptt_key_for_key(arg))
+        return;
+    prefs.stt_ptt_key = arg;
+    note_prefs_dirty();
+    broadcast_audio_prefs();
+});
+
+/* The prefs window's "Retry" button, after a model failed to load. */
+electron.ipcMain.on('audio_retry_load', function(ev, arg) {
+    if (!audio_available)
+        return;
+    /* Restart the engine from scratch; a failed download can leave it in
+       a sulky state. */
+    if (audioengine)
+        stop_audio_engine();
+    sync_audio_engine_loads();
+});
+
+electron.ipcMain.on('audio_show_model_dir', function(ev, arg) {
+    var dir = audio_model_dir();
+    try {
+        fs.mkdirSync(dir, { recursive:true });
+    }
+    catch (ex) {}
+    electron.shell.openPath(dir);
+});
+
+/* Speech traffic from the game windows. */
+
+electron.ipcMain.on('speech_speak', function(ev, arg) {
+    var game = game_for_webcontents(ev.sender);
+    if (!game || !prefs.tts_enabled)
+        return;
+    if (!audioengine || !audioengine_ready)
+        return;
+    audioengine.postMessage({
+        type: 'tts_speak',
+        winid: game.id,
+        jobid: arg.jobid,
+        text: arg.text,
+        voice: prefs.tts_voice,
+        speed: prefs.tts_speed
+    });
+});
+
+electron.ipcMain.on('speech_stop', function(ev, arg) {
+    var game = game_for_webcontents(ev.sender);
+    if (!game)
+        return;
+    if (!audioengine || !audioengine_ready)
+        return;
+    audioengine.postMessage({ type:'tts_stop', winid:game.id });
+});
+
+electron.ipcMain.on('speech_transcribe', function(ev, arg) {
+    var game = game_for_webcontents(ev.sender);
+    if (!game || !prefs.stt_enabled)
+        return;
+    if (!audioengine || !audioengine_ready) {
+        invoke_app_hook(game.win, 'speech_stt_error', { reqid:arg.reqid, error:'Speech recognition is not running.' });
+        return;
+    }
+    audioengine.postMessage({
+        type: 'stt_transcribe',
+        winid: game.id,
+        reqid: arg.reqid,
+        audio: arg.audio
+    });
+});
+
 electron.ipcMain.on('search_done', function(ev, arg) {
     var obj = game_trashow_for_webcontents(ev.sender);
     if (!obj)
@@ -2214,6 +2770,13 @@ app.on('ready', function() {
     app_ready = true;
 
     load_prefs();
+
+    audio_available = check_audio_available();
+    if (audio_available && (prefs.tts_enabled || prefs.stt_enabled)) {
+        /* Start loading the speech models right away, so they're ready
+           by the time a game is opened. */
+        sync_audio_engine_loads();
+    }
 
     if (process.platform != 'darwin' && process.platform != 'win32') {
         /* Mac windows don't have icons; Windows windows inherit their

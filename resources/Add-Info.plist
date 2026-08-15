@@ -2,6 +2,8 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Lectrote uses the microphone for push-to-talk voice commands. Speech is recognized on this computer and never sent anywhere.</string>
 	<key>CFBundleDocumentTypes</key>
 	<array>
 		<dict>

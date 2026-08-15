@@ -3,20 +3,24 @@ const electron = require('electron');
 
 const fonts = require('./fonts.js');
 const formats = require('./formats.js');
+const audioconfig = require('./audioconfig.js');
 
 /* Code for the Preferences window. */
 
-const tablist = [ 'appear', 'terp', 'tra' ];
+const tablist = [ 'appear', 'terp', 'tra', 'audio' ];
 
 var darklight_flag = false;
+var audio_available = false;
+var last_audio_status = null; /* the audio_status object from main.js */
 
 /* Set up the initial appearance of the window. This adjusts the controls
    and the sample text, but does not send changes to the app (because there
    have been no changes yet).
 */
-function setup_with_prefs(prefs, isbound)
+function setup_with_prefs(prefs, isbound, arg)
 {
     var sel, optel;
+    audio_available = (arg && arg.audioavailable) ? true : false;
 
     // Function-calling function because closures suck.
     var setclick = function(val) {
@@ -105,8 +109,14 @@ function setup_with_prefs(prefs, isbound)
         sel.on('change', evhan_glulx_terp);
     }
     else {
-        sel = $('#tabheader');
-        sel.hide();
+        /* A bound game only gets the Appearance tab (and Audio, if
+           available). */
+        $('#tabbutton-terp').hide();
+        $('#tabbutton-tra').hide();
+        if (!audio_available) {
+            sel = $('#tabheader');
+            sel.hide();
+        }
     }
 
     for (var val of [ 'forever', 'count', 'time' ]) {
@@ -123,26 +133,102 @@ function setup_with_prefs(prefs, isbound)
     sel = $('#retain-daycount');
     sel.prop('value', prefs.traretain_daycount);
     sel.on('change', evhan_retain_daycount);
+
+    setup_audio_prefs(prefs, arg);
+}
+
+/* Set up the Audio tab. */
+function setup_audio_prefs(prefs, arg)
+{
+    var sel, optel;
+
+    if (!audio_available) {
+        $('#tabbutton-audio').hide();
+        $('#audio-unavailable').show();
+        $('#audio-controls').hide();
+        return;
+    }
+
+    sel = $('#check-tts');
+    sel.prop('checked', prefs.tts_enabled ? true : false);
+    sel.on('change', evhan_tts_enabled);
+
+    sel = $('#sel-tts-voice');
+    sel.prop('disabled', false);
+    sel.empty();
+    for (var voice of audioconfig.tts_voices) {
+        optel = $('<option>', { value:voice.id }).text(voice.label);
+        if (prefs.tts_voice == voice.id)
+            optel.prop('selected', true);
+        sel.append(optel);
+    }
+    sel.on('change', evhan_tts_voice);
+
+    sel = $('#range-tts-speed');
+    sel.attr('min', audioconfig.tts_speed_min);
+    sel.attr('max', audioconfig.tts_speed_max);
+    sel.attr('step', audioconfig.tts_speed_step);
+    sel.val(prefs.tts_speed);
+    sel.on('input', evhan_tts_speed);
+    apply_tts_speed(prefs.tts_speed);
+
+    sel = $('#check-tts-speak-input');
+    sel.prop('checked', prefs.tts_speak_input ? true : false);
+    sel.on('change', evhan_tts_speak_input);
+
+    sel = $('#check-tts-fallback');
+    sel.prop('checked', prefs.tts_fallback_os ? true : false);
+    sel.on('change', evhan_tts_fallback);
+
+    sel = $('#check-stt');
+    sel.prop('checked', prefs.stt_enabled ? true : false);
+    sel.on('change', evhan_stt_enabled);
+
+    sel = $('#sel-stt-model');
+    sel.prop('disabled', false);
+    sel.empty();
+    for (var model of audioconfig.stt_models) {
+        optel = $('<option>', { value:model.key }).text(model.label);
+        if (prefs.stt_model == model.key)
+            optel.prop('selected', true);
+        sel.append(optel);
+    }
+    sel.on('change', evhan_stt_model);
+
+    sel = $('#sel-stt-ptt');
+    sel.prop('disabled', false);
+    sel.empty();
+    for (var ptt of audioconfig.ptt_keys) {
+        optel = $('<option>', { value:ptt.key }).text(ptt.label);
+        if (prefs.stt_ptt_key == ptt.key)
+            optel.prop('selected', true);
+        sel.append(optel);
+    }
+    sel.on('change', evhan_stt_ptt);
+
+    sel = $('#check-stt-autosubmit');
+    sel.prop('checked', prefs.stt_auto_submit ? true : false);
+    sel.on('change', evhan_stt_autosubmit);
+
+    if (arg && arg.modeldir)
+        $('#display-model-dir').text(arg.modeldir);
+    $('#btn-show-models').on('click', function(ev) {
+        ev.preventDefault();
+        electron.ipcRenderer.send('audio_show_model_dir');
+    });
+
+    last_audio_status = (arg ? arg.audiostatus : null);
+    apply_audio_status(last_audio_status);
 }
 
 function set_tab(val)
 {
-    switch (val) {
-    case 'appear':
-        $('body').addClass('CurrentTabAppear');
-        $('body').removeClass('CurrentTabTerp');
-        $('body').removeClass('CurrentTabTra');
-        break;
-    case 'terp':
-        $('body').removeClass('CurrentTabAppear');
-        $('body').addClass('CurrentTabTerp');
-        $('body').removeClass('CurrentTabTra');
-        break;
-    default:
-        $('body').removeClass('CurrentTabAppear');
-        $('body').removeClass('CurrentTabTerp');
-        $('body').addClass('CurrentTabTra');
-        break;
+    for (var tab of tablist) {
+        var cls = 'CurrentTab' + tab.charAt(0).toUpperCase() + tab.slice(1);
+        if (tab == val)
+            $('body').addClass(cls);
+        else
+            $('body').removeClass(cls);
     }
 }
 
@@ -273,6 +359,64 @@ function apply_zoom_level(val)
     el.text(text);
 }
 
+function apply_tts_speed(val)
+{
+    var el = $('#display-tts-speed');
+    var num = Number(val);
+    if (isNaN(num))
+        num = 1.0;
+    el.text(num.toFixed(2).replace(/0$/, '') + '\u00D7');
+}
+
+/* Show what the speech models are up to (loading, downloading, ready,
+   failed). Called with the audio_status object from main.js. */
+function apply_audio_status(status)
+{
+    var checks = { tts:$('#check-tts'), stt:$('#check-stt') };
+    for (var key of ['tts', 'stt']) {
+        var el = $('#status-'+key);
+        el.empty();
+        el.removeClass('Error');
+        var state = (status && status[key]) ? status[key] : null;
+        var enabled = checks[key].prop('checked');
+        var text = '';
+        if (!enabled) {
+            text = '';
+        }
+        else if (!state || state.status == 'unloaded') {
+            text = 'Starting the speech engine\u2026';
+        }
+        else if (state.status == 'loading') {
+            text = 'Loading the model\u2026';
+        }
+        else if (state.status == 'downloading') {
+            text = 'Downloading the model (first time only)\u2026';
+            if (state.pct !== null && state.pct !== undefined) {
+                el.text(text);
+                var progel = $('<progress>', { max:100, value:state.pct });
+                el.append(progel);
+                el.append($('<span>').text(' ' + state.pct + '%'));
+                continue;
+            }
+        }
+        else if (state.status == 'ready') {
+            text = 'Ready.';
+        }
+        else if (state.status == 'error') {
+            el.addClass('Error');
+            el.text('Could not load the model: ' + (state.error || 'unknown error'));
+            var btn = $('<button>').text('Retry');
+            btn.on('click', function(ev) {
+                ev.preventDefault();
+                electron.ipcRenderer.send('audio_retry_load');
+            });
+            el.append(btn);
+            continue;
+        }
+        el.text(text);
+    }
+}
+
 function apply_darklight(val)
 {
     darklight_flag = val;
@@ -354,15 +498,93 @@ function evhan_retain_daycount()
     electron.ipcRenderer.send('pref_traretain_daycount', 1*val);
 }
 
+function evhan_tts_enabled()
+{
+    var val = $('#check-tts').prop('checked');
+    electron.ipcRenderer.send('pref_tts_enabled', val);
+}
+
+function evhan_tts_voice()
+{
+    var val = $('#sel-tts-voice').val();
+    electron.ipcRenderer.send('pref_tts_voice', val);
+}
+
+function evhan_tts_speed()
+{
+    var val = Number($('#range-tts-speed').val());
+    apply_tts_speed(val);
+    electron.ipcRenderer.send('pref_tts_speed', val);
+}
+
+function evhan_tts_speak_input()
+{
+    var val = $('#check-tts-speak-input').prop('checked');
+    electron.ipcRenderer.send('pref_tts_speak_input', val);
+}
+
+function evhan_tts_fallback()
+{
+    var val = $('#check-tts-fallback').prop('checked');
+    electron.ipcRenderer.send('pref_tts_fallback_os', val);
+}
+
+function evhan_stt_enabled()
+{
+    var val = $('#check-stt').prop('checked');
+    electron.ipcRenderer.send('pref_stt_enabled', val);
+}
+
+function evhan_stt_model()
+{
+    var val = $('#sel-stt-model').val();
+    electron.ipcRenderer.send('pref_stt_model', val);
+}
+
+function evhan_stt_ptt()
+{
+    var val = $('#sel-stt-ptt').val();
+    electron.ipcRenderer.send('pref_stt_ptt_key', val);
+}
+
+function evhan_stt_autosubmit()
+{
+    var val = $('#check-stt-autosubmit').prop('checked');
+    electron.ipcRenderer.send('pref_stt_auto_submit', val);
+}
+
 /* Respond to messages from the app. */
 
 electron.ipcRenderer.on('set-darklight-mode', function(ev, arg) {
     apply_darklight(arg);
 });
 electron.ipcRenderer.on('current-prefs', function(ev, arg) {
-    setup_with_prefs(arg.prefs, arg.isbound);
+    setup_with_prefs(arg.prefs, arg.isbound, arg);
 });
 electron.ipcRenderer.on('set-zoom-level', function(ev, arg) {
     $('#range-zoom').val(arg);
     apply_zoom_level(arg);
+});
+
+/* The speech prefs changed somewhere else (a menu toggle, say). */
+electron.ipcRenderer.on('set-audio-prefs', function(ev, arg) {
+    if (!audio_available)
+        return;
+    $('#check-tts').prop('checked', arg.tts_enabled ? true : false);
+    $('#sel-tts-voice').val(arg.tts_voice);
+    $('#range-tts-speed').val(arg.tts_speed);
+    apply_tts_speed(arg.tts_speed);
+    $('#check-tts-speak-input').prop('checked', arg.tts_speak_input ? true : false);
+    $('#check-tts-fallback').prop('checked', arg.tts_fallback_os ? true : false);
+    $('#check-stt').prop('checked', arg.stt_enabled ? true : false);
+    $('#sel-stt-model').val(arg.stt_model);
+    $('#sel-stt-ptt').val(arg.stt_ptt_key);
+    $('#check-stt-autosubmit').prop('checked', arg.stt_auto_submit ? true : false);
+    apply_audio_status(last_audio_status);
+});
+electron.ipcRenderer.on('audio-status', function(ev, arg) {
+    last_audio_status = arg;
+    if (!audio_available)
+        return;
+    apply_audio_status(arg);
 });

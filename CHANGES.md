@@ -1,4 +1,10 @@
 
+## Unreleased
+
+- Speech output: Lectrote can read the story aloud with the Kokoro neural voice (View menu or Preferences, Audio tab). Choice of voices and speaking rate; Stop Speaking and Repeat Last Turn commands.
+- Voice input: push-to-talk speech recognition with Whisper, typed (and optionally sent) as your command. Configurable talk key; a Listen toggle for hands-free use.
+- Both features run entirely on your computer; the models are downloaded on first use. Neither is on by default. Packaged apps can leave them out (`makedist.py --no-audio`, or `lectroteAudioFeatures: false` for bound games).
+
 ## 1.5.6 (Oct 4, 2025)
 
 - Improved file-loading for the Quixe interpreter to avoid crashes on very large gblorb files.

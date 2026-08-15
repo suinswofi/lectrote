@@ -36,6 +36,21 @@ You can also use this package to construct a "bound game" -- an app which plays 
 
 Linux note: Depending on your Linux configuration and how you install this package, you may have to add the `--no-sandbox` option when launching Lectrote.
 
+## Speech output and voice input
+
+Lectrote can read the story aloud and take spoken commands. Both features run entirely on your computer -- no cloud services, and nothing you say or play is sent anywhere. Turn them on in the Preferences window (Audio tab), or from the View menu.
+
+- **Speak Story Text** (Cmd/Ctrl-Shift-V) reads each turn's new story text aloud with the [Kokoro][] neural voice, in your choice of voices and speaking rate. Typing a new command (or the game producing new text) interrupts the reading; use **Stop Speaking** (Cmd/Ctrl-.) to hush it and **Repeat Last Turn** (Cmd/Ctrl-Shift-R) to hear the last turn again. The status line is not read.
+- **Voice Input** (Cmd/Ctrl-Shift-M) is push-to-talk: hold the talk key (Ctrl-Space by default; you can change it in the preferences), say your command, and release. Speech is recognized with [Whisper][] and typed into the game's input line -- and sent, unless you turn off "Send the command as soon as it is recognized", in which case you can edit it before hitting Enter. **Listen (Toggle)** (Cmd/Ctrl-Shift-L) starts and stops recording without holding a key. Games which wait for a single keypress get the first letter of what you said (or the digit, if you say a number).
+
+The first time you turn on either feature, Lectrote downloads the model it needs from [huggingface.co][hf] into your Lectrote data folder (~90 MB for the voice; 130 MB to 900 MB for the recognizer, depending on the size you pick). After that it works offline. Until the voice model is ready, Lectrote can fall back to your operating system's built-in voice. On MacOS, you will be asked for microphone permission the first time you turn on voice input.
+
+If huggingface.co is hard to reach from where you are, you can point Lectrote at a mirror by setting the `HF_ENDPOINT` environment variable before launching it.
+
+[Kokoro]: https://huggingface.co/hexgrad/Kokoro-82M
+[Whisper]: https://github.com/openai/whisper
+[hf]: https://huggingface.co/onnx-community
+
 ## Glulx (Inform 7) support
 
 Because this relies on the [Quixe][] interpreter, sound is not supported. It's also not as fast as a native interpreter.
@@ -80,6 +95,13 @@ This relies on the [inkjs][] interpreter. It is a deliberately non-fancy present
 - TADS (in emglken)  is copyright (c) 1991-2012 by Michael J. Roberts ([dual-licensed GPL/TADS license][licensefile])
 - Scare (in emglken)  is copyright (c) 2003-2008, Simon Baldwin and Mark J. Tilford ([GPL][licensefile])
 - RemGlk (in emglken) is copyright (c) 2012-2023, Andrew Plotkin ([MIT license][licensefile])
+- The speech features use [Transformers.js][transformersjs] and [kokoro-js][kokorojs] (Apache-2.0), [ONNX Runtime][onnxruntime] (MIT), and [phonemizer.js][phonemizerjs] (Apache-2.0, which embeds [espeak-ng][], GPL-3.0). The Kokoro model is Apache-2.0; the Whisper models are MIT. None of these are included in the source repository; they are fetched by `npm install` and (the models) at run time.
+
+[transformersjs]: https://github.com/huggingface/transformers.js
+[kokorojs]: https://github.com/hexgrad/kokoro/tree/main/kokoro.js
+[onnxruntime]: https://onnxruntime.ai/
+[phonemizerjs]: https://www.npmjs.com/package/phonemizer
+[espeak-ng]: https://github.com/espeak-ng/espeak-ng
 
 [licensefile]: LICENSE
 
@@ -95,7 +117,9 @@ To fetch all the necessary Node packages and place them in a `node_modules` dire
 
     npm install
 
-This command also fetches the Quixe submodule (which will live in the `quixe` directory). You must have `git` installed for this to work.
+This command also fetches the Quixe submodule (which will live in the `quixe` directory). You must have `git` installed for this to work. It also fetches the speech modules (`kokoro-js`, `@huggingface/transformers`, and the ONNX runtime). The app runs fine if those are absent -- the speech features simply don't appear.
+
+To trace what the speech features are doing, set `LECTROTE_AUDIO_DEBUG=1` in the environment.
 
 Now just type
 
@@ -130,6 +154,8 @@ If you want to code-sign the Mac version, use the `--macsign` argument:
 
 You must be a registered Apple developer to do this. The argument must be the name of the "Developer Id Application" certificate in your keychain. Run the Keychain Access app to see this. If you don't have one, the easiest way to set it up is to run Xcode, open the Preferences, select Accounts, and hit Manage Certificates.
 
+The speech modules add about 70-80 MB to each package (the ONNX runtime for the target platform, the Kokoro voice data, and the phonemizer). `makedist.py` copies just the needed files out of `node_modules`, so `npm install` must have been run first. Add `--no-audio` to build without the speech features. (There is no 32-bit Windows ONNX runtime, so `win32-ia32` builds never include them.)
+
 ## Packaging a bound game
 
 You will need to create a separate directory for your game's files. Copy `package.json` to the directory, adding or modifying these lines:
@@ -144,6 +170,7 @@ You will need to create a separate directory for your game's files. Copy `packag
 - `lectroteExtraFiles`: An array of extra files to include. These are assumed to be in the game directory, so you do not have to include the directory prefix. (This list must include the game file -- yes, it's redundant with `lectrotePackagedGame`.)
 - `lectroteMacAppID`: If you plan to build a MacOS app, a reverse-DNS ID string to uniquely identify it.
 - `lectroteCopyright`: Copyright string (applied to Windows binaries).
+- `lectroteAudioFeatures`: Set to `false` to leave the speech output/input features out of your app. (Optional; the default is to include them.)
 
 (Do not change `lectroteVersion`; that should always show the Lectrote release that you built your bound app from.)
 

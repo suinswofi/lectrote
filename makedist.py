@@ -46,6 +46,9 @@ popt.add_option('-v', '--version',
                 action='store', dest='buildversion',
                 default='1',
                 help='build version (default 1)')
+popt.add_option('--no-audio',
+                action='store_true', dest='noaudio',
+                help='omit the speech (TTS/STT) modules')
 
 (opts, args) = popt.parse_args()
 
@@ -57,6 +60,9 @@ appfiles = [
     './traread.js',
     './tragen.js',
     './formats.js',
+    './audioconfig.js',
+    './audioengine.js',
+    './speech.js',
     './play.html',
     './prefs.html',
     './prefs.js',
@@ -132,6 +138,94 @@ rootfiles = [
     './LICENSES-FONTS.txt',
 ]
 
+# The npm modules needed for the speech features (see audioengine.js).
+# For each package we list just the files needed at runtime, since the
+# packages contain a lot of dev/browser bulk. The ONNX runtime's native
+# binaries are handled separately (one platform per build).
+audio_modules = [
+    ('kokoro-js', [ 'package.json', 'LICENSE', 'dist/kokoro.cjs', 'voices' ]),
+    ('phonemizer', [ 'package.json', 'LICENSE', 'dist/phonemizer.cjs' ]),
+    ('@huggingface/transformers', [ 'package.json', 'LICENSE', 'dist/transformers.node.cjs' ]),
+    ('onnxruntime-common', [ 'package.json', 'dist/cjs' ]),
+    ('onnxruntime-node', [ 'package.json', 'dist' ]),
+]
+
+# transformers.js requires the "sharp" image library at load time, even
+# though we never process images. Rather than ship libvips for every
+# platform, we install a stub which is truthy but throws if called.
+sharp_stub = '''"use strict";
+/* Stub for the sharp image library. Lectrote does not process images
+   with transformers.js; this exists only so that require('sharp')
+   succeeds. */
+function sharp() {
+    throw new Error('The sharp image library is not included in Lectrote.');
+}
+sharp.default = sharp;
+module.exports = sharp;
+'''
+
+def copy_tree(src, dest):
+    if os.path.isdir(src):
+        shutil.copytree(src, dest, dirs_exist_ok=True)
+    else:
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        shutil.copyfile(src, dest)
+
+def audio_wanted(pkg, platform, arch):
+    if opts.noaudio:
+        return False
+    if pkg.get('lectroteAudioFeatures') is False:
+        return False
+    if platform == 'win32' and arch == 'ia32':
+        # onnxruntime-node has no 32-bit Windows binary.
+        return False
+    return True
+
+def install_audio_modules(appdir, platform, arch):
+    """Copy the speech modules into appdir/node_modules, with only the
+    ONNX runtime binaries for the target platform.
+    """
+    destroot = os.path.join(appdir, 'node_modules')
+    if os.path.exists(destroot):
+        shutil.rmtree(destroot)
+
+    for (name, files) in audio_modules:
+        srcdir = os.path.join('node_modules', name)
+        if not os.path.isdir(srcdir):
+            raise Exception('audio module not installed (run npm install): ' + name)
+        for filename in files:
+            src = os.path.join(srcdir, filename)
+            if not os.path.exists(src):
+                raise Exception('audio module file missing: ' + src)
+            copy_tree(src, os.path.join(destroot, name, filename))
+
+    # The native ONNX runtime binaries for the target platform(s).
+    if arch == 'universal':
+        archls = [ 'x64', 'arm64' ]
+    else:
+        archls = [ arch ]
+    for val in archls:
+        bindir = os.path.join('napi-v3', platform, val)
+        src = os.path.join('node_modules', 'onnxruntime-node', 'bin', bindir)
+        if not os.path.isdir(src):
+            raise Exception('no onnxruntime binaries for %s-%s: %s' % (platform, val, src))
+        copy_tree(src, os.path.join(destroot, 'onnxruntime-node', 'bin', bindir))
+
+    stubdir = os.path.join(destroot, 'sharp')
+    os.makedirs(stubdir, exist_ok=True)
+    fl = open(os.path.join(stubdir, 'package.json'), 'w')
+    json.dump({ 'name':'sharp', 'version':'0.0.0-lectrote-stub', 'main':'index.js', 'license':'MIT' }, fl)
+    fl.close()
+    fl = open(os.path.join(stubdir, 'index.js'), 'w')
+    fl.write(sharp_stub)
+    fl.close()
+
+    total = 0
+    for (dirpath, dirnames, filenames) in os.walk(destroot):
+        for filename in filenames:
+            total += os.path.getsize(os.path.join(dirpath, filename))
+    print('Speech modules for %s-%s: %.1f MB' % (platform, arch, total / 1048576.0))
+
 def install(resourcedir, pkg):
     if not os.path.isdir(resourcedir):
         raise Exception('path does not exist: ' + resourcedir)
@@ -193,6 +287,13 @@ def install(resourcedir, pkg):
 def builddir(dir, pack, pkg):
     (platform, dummy, arch) = pack.partition('-')
 
+    if audio_wanted(pkg, platform, arch):
+        install_audio_modules('tempapp', platform, arch)
+    else:
+        val = os.path.join('tempapp', 'node_modules')
+        if os.path.exists(val):
+            shutil.rmtree(val)
+
     cmd = 'node_modules/.bin/electron-packager'
     args = [
         cmd, 'tempapp', product_name,
@@ -200,7 +301,8 @@ def builddir(dir, pack, pkg):
         '--build-version', opts.buildversion,
         '--arch='+arch, '--platform='+platform,
         '--out', 'dist',
-        '--overwrite'
+        '--overwrite',
+        '--no-prune'  # we curate node_modules ourselves; see install_audio_modules()
         ]
 
     if platform == 'darwin':

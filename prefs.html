@@ -59,6 +59,9 @@ body.DarkMode {
 .CurrentTabTra #tabbutton-tra {
   background: #AAA;
 }
+.CurrentTabAudio #tabbutton-audio {
+  background: #AAA;
+}
 .DarkMode.CurrentTabAppear #tabbutton-appear {
   background: #888;
 }
@@ -66,6 +69,9 @@ body.DarkMode {
   background: #888;
 }
 .DarkMode.CurrentTabTra #tabbutton-tra {
+  background: #888;
+}
+.DarkMode.CurrentTabAudio #tabbutton-audio {
   background: #888;
 }
 
@@ -77,6 +83,64 @@ body.DarkMode {
 }
 .CurrentTabTra #tabcontent-tra {
   display: block;
+}
+.CurrentTabAudio #tabcontent-audio {
+  display: block;
+}
+
+#tabcontent-audio {
+  font-size: 0.9em;
+}
+#tabcontent-audio h2 {
+  margin-top: 0.7em;
+  margin-bottom: 0.3em;
+}
+#tabcontent-audio .FormSection {
+  margin-bottom: 0.4em;
+}
+#tabcontent-audio .FormSection > div {
+  margin-top: 0.25em;
+  margin-bottom: 0.25em;
+}
+#tabcontent-audio select {
+  font-size: 0.95em;
+}
+#tabcontent-audio input[type=range] {
+  width: 40%;
+  vertical-align: middle;
+}
+.AudioStatus {
+  color: #444;
+  font-style: italic;
+}
+.DarkMode .AudioStatus {
+  color: #CCC;
+}
+.AudioStatus.Error {
+  color: #A33;
+  font-style: normal;
+}
+.DarkMode .AudioStatus.Error {
+  color: #F99;
+}
+.AudioStatus progress {
+  width: 10em;
+  vertical-align: middle;
+  margin-left: 0.5em;
+}
+.AudioNote {
+  font-size: 0.9em;
+  color: #444;
+}
+.DarkMode .AudioNote {
+  color: #CCC;
+}
+#tabcontent-audio button {
+  font-size: 0.9em;
+  margin-left: 0.5em;
+}
+#audio-unavailable {
+  display: none;
 }
 
 h2 {
@@ -195,6 +259,7 @@ require('./prefs.js');
 <div id="tabbutton-appear" class="TabButton">Appearance</div>
 <div id="tabbutton-terp" class="TabButton">Interpreters</div>
 <div id="tabbutton-tra" class="TabButton">Transcripts</div>
+<div id="tabbutton-audio" class="TabButton">Audio</div>
 </div>
 <div id="content">
 <div id="tabcontent-appear" class="TabContent">
@@ -292,6 +357,84 @@ down a gully.
 </div>
 <div class="FormSection">
 <i>Deletions occur when you quit Lectrote.</i>
+</div>
+
+</div>
+
+<div id="tabcontent-audio" class="TabContent">
+
+<div id="audio-unavailable" class="FormSection">
+<i>Speech features are not available in this build of Lectrote.</i>
+</div>
+
+<div id="audio-controls">
+
+<h2>Speech Output</h2>
+
+<div class="FormSection">
+<div>
+<input type="checkbox" id="check-tts">
+<label for="check-tts">Read the story text aloud</label>
+</div>
+<div>
+<label for="sel-tts-voice">Voice:</label>
+<select disabled id="sel-tts-voice" name="tts-voice">
+<option>&nbsp;--&nbsp;</option>
+</select>
+</div>
+<div>
+<label for="range-tts-speed">Speed:</label>
+<input id="range-tts-speed" name="tts-speed" type="range">
+&nbsp;
+<span id="display-tts-speed">--</span>
+</div>
+<div>
+<input type="checkbox" id="check-tts-speak-input">
+<label for="check-tts-speak-input">Also read my commands back to me</label>
+</div>
+<div>
+<input type="checkbox" id="check-tts-fallback">
+<label for="check-tts-fallback">Use the system voice while the Kokoro voice is downloading</label>
+</div>
+<div class="AudioStatus" id="status-tts"></div>
+</div>
+
+<h2>Voice Input</h2>
+
+<div class="FormSection">
+<div>
+<input type="checkbox" id="check-stt">
+<label for="check-stt">Voice input (push to talk)</label>
+</div>
+<div>
+<label for="sel-stt-model">Recognizer:</label>
+<select disabled id="sel-stt-model" name="stt-model">
+<option>&nbsp;--&nbsp;</option>
+</select>
+</div>
+<div>
+<label for="sel-stt-ptt">Hold this key to talk:</label>
+<select disabled id="sel-stt-ptt" name="stt-ptt">
+<option>&nbsp;--&nbsp;</option>
+</select>
+</div>
+<div>
+<input type="checkbox" id="check-stt-autosubmit">
+<label for="check-stt-autosubmit">Send the command as soon as it is recognized</label>
+</div>
+<div class="AudioStatus" id="status-stt"></div>
+</div>
+
+<hr>
+
+<div class="FormSection AudioNote">
+Speech is generated and recognized entirely on this computer. The models
+(Kokoro and Whisper) are downloaded once from huggingface.co when you turn
+these features on, and kept in
+<span id="display-model-dir">the app data folder</span>.
+<button id="btn-show-models">Show Folder</button>
+</div>
+
 </div>
 
 </div>

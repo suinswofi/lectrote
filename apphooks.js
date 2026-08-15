@@ -11,6 +11,7 @@ const searchbar = require('./searchbar.js');
 const formats = require('./formats.js');
 const traread = require('./traread.js');
 const tragen = require('./tragen.js');
+const speech = require('./speech.js');
 
 function load_named_game(arg)
 {
@@ -27,8 +28,19 @@ function load_named_game(arg)
     game_options.default_page_title = default_name;
     game_options.game_format_name = engine.name; /* label used for loading error messages */
     game_options.engine_name = engine.name; /* label used in page title */
-    game_options.recording_handler = tragen.record_update;
-    
+    /* The recording handler gets every turn's input and output. The
+       transcript module writes it to disk; the speech module reads
+       the new text aloud. */
+    game_options.recording_handler = function(obj) {
+        tragen.record_update(obj);
+        try {
+            speech.record_update(obj);
+        }
+        catch (ex) {
+            console.log('speech.record_update failed:', ex);
+        }
+    };
+
     var arr = null;
     if (engine.load)
         arr = engine.load(arg, buf, game_options);
@@ -255,6 +267,15 @@ const namespace = {
     set_color_theme : set_color_theme,
     set_font : set_font,
     search_request : searchbar.search_request,
+    set_audio_prefs : speech.set_audio_prefs,
+    set_audio_status : speech.set_audio_status,
+    speech_audio : speech.speech_audio,
+    speech_done : speech.speech_done,
+    speech_result : speech.speech_result,
+    speech_stt_error : speech.speech_stt_error,
+    speech_stop_playback : speech.speech_stop_playback,
+    speech_repeat : speech.speech_repeat,
+    speech_listen_toggle : speech.speech_listen_toggle,
     sequence : sequence
 };
 
@@ -274,6 +295,7 @@ for (var name in namespace) {
 
 $(document).ready(function() {
     searchbar.construct_searchbar();
+    speech.construct_audiobar();
 });
 
 return namespace;
